@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/pubspec.yaml'
+
+# IMPORTANT: Never cancel a release in progress. Queue subsequent runs.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install aft
+        run: dart pub global activate -spath packages/aft
+
+      - name: Check for new tags
+        id: check-tags
+        run: |
+          aft publish --tags 2>&1 | tee tags_output.txt
+          TAGS=$(grep "^New tag:" tags_output.txt | sed 's/^New tag: //' || true)
+          if [ -z "$TAGS" ]; then
+            echo "No new tags to create. Nothing to release."
+            echo "has_tags=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New tags found:"
+            echo "$TAGS"
+            echo "has_tags=true" >> "$GITHUB_OUTPUT"
+            echo "$TAGS" > new_tags.txt
+          fi
+
+      - name: Verify publish (pre-tag dry run)
+        if: steps.check-tags.outputs.has_tags == 'true'
+        run: aft publish --dry-run --force
+
+      - name: Create and push tags
+        if: steps.check-tags.outputs.has_tags == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          while IFS= read -r tag; do
+            echo "Creating tag: $tag"
+            git tag "$tag"
+          done < new_tags.txt
+          git push origin --tags
+
+      - name: Verify publish (post-tag dry run)
+        if: steps.check-tags.outputs.has_tags == 'true'
+        run: aft publish --dry-run --force
+
+      - name: Create GitHub releases
+        if: steps.check-tags.outputs.has_tags == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while IFS= read -r tag; do
+            PACKAGE="${tag%-v*}"
+            VERSION="${tag##*-v}"
+
+            CHANGELOG_PATH=$(find packages -name "CHANGELOG.md" -path "*/${PACKAGE}/*" -not -path "*/test/*" | head -1)
+
+            NOTES=""
+            if [ -n "$CHANGELOG_PATH" ]; then
+              NOTES=$(awk -v ver="$VERSION" '
+                /^## / {
+                  if (found) exit
+                  if ($2 == ver) { found=1; next }
+                }
+                found { print }
+              ' "$CHANGELOG_PATH")
+            fi
+
+            if [ -z "$NOTES" ]; then
+              NOTES="Release ${PACKAGE} v${VERSION}"
+            fi
+
+            echo "Creating GitHub release for: $tag"
+            gh release create "$tag" \
+              --title "${PACKAGE} v${VERSION}" \
+              --notes "$NOTES" \
+              --target main
+          done < new_tags.txt
