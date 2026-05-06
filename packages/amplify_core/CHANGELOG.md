@@ -1,3 +1,8 @@
+## 2.11.1
+
+### Features
+- Released with ec2
+
 ## 2.11.0
 
 ### Features
