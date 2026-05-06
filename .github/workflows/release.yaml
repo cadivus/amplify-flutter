@@ -75,22 +75,9 @@ jobs:
             PACKAGE="${tag%-v*}"
             VERSION="${tag##*-v}"
 
-            CHANGELOG_PATH=$(find packages -name "CHANGELOG.md" -path "*/${PACKAGE}/*" -not -path "*/test/*" | head -1)
-
-            NOTES=""
-            if [ -n "$CHANGELOG_PATH" ]; then
-              NOTES=$(awk -v ver="$VERSION" '
-                /^## / {
-                  if (found) exit
-                  if ($2 == ver) { found=1; next }
-                }
-                found { print }
-              ' "$CHANGELOG_PATH")
-            fi
-
-            if [ -z "$NOTES" ]; then
-              NOTES="Release ${PACKAGE} v${VERSION}"
-            fi
+            NOTES=$(aft get-release-notes --package "$PACKAGE" --version "$VERSION" \
+              | awk '/^Changelog:$/{f=1;next} f')
+            [ -z "$NOTES" ] && NOTES="Release ${PACKAGE} v${VERSION}"
 
             echo "Creating GitHub release for: $tag"
             gh release create "$tag" \
