@@ -116,7 +116,7 @@ jobs:
           done < "$RUNNER_TEMP/new_tags.txt"
           git push origin --tags
 
-      - name: Verify publish (post-tag dry run - make non-dry-run)
+      - name: Verify publish (post-tag dry run - make non-dry-run before merging this workflow)
         if: steps.check-tags.outputs.has_tags == 'true'
         run: aft publish --dry-run --force
 
