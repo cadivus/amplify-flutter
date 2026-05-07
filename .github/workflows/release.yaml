@@ -30,6 +30,9 @@ jobs:
       - image:ubuntu-8.0
       - instance-size:medium
     steps:
+      - name: Print Ubuntu version
+        run: cat /etc/os-release
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
