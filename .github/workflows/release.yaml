@@ -20,8 +20,8 @@ jobs:
     name: Start self-hosted EC2 runner
     runs-on: ubuntu-latest
     outputs:
-      label: ${{ steps.start-ec2-runner.outputs.label }}
-      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+      label: ${{ steps.start.outputs.label }}
+      ec2-instance-id: ${{ steps.start.outputs.ec2-instance-id }}
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -30,26 +30,95 @@ jobs:
           aws-region: ${{ secrets.RELEASE_RUNNER_AWS_REGION }}
 
       - name: Start EC2 runner
-        id: start-ec2-runner
-        uses: machulav/ec2-github-runner@v2
-        with:
-          mode: start
-          github-token: ${{ secrets.RELEASE_RUNNER_GH_PERSONAL_ACCESS_TOKEN }}
-          ec2-image-id: ami-07a00cf47dbbc844c
-          ec2-instance-type: t3a.medium
-          subnet-id: ${{ secrets.RELEASE_RUNNER_EC2_SUBNET_ID }}
-          security-group-id: ${{ secrets.RELEASE_RUNNER_EC2_SECURITY_GROUP_ID }}
-          ec2-volume-size: 50
-          aws-resource-tags: >
-            [
-              {"Key": "Name", "Value": "github-actions-runner"},
-              {"Key": "GitHubRepository", "Value": "${{ github.repository }}"},
-              {"Key": "Purpose", "Value": "release"}
-            ]
-          run-runner-as-user: ubuntu
-          pre-runner-script: |
-            sudo apt-get update -y && \
-            sudo apt-get install -y git libicu-dev curl xz-utils clang cmake ninja-build pkg-config libgtk-3-dev
+        id: start
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_RUNNER_GH_PERSONAL_ACCESS_TOKEN }}
+          REPO: ${{ github.repository }}
+          EC2_IMAGE_ID: ami-07a00cf47dbbc844c
+          EC2_INSTANCE_TYPE: t3a.medium
+          SUBNET_ID: ${{ secrets.RELEASE_RUNNER_EC2_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ secrets.RELEASE_RUNNER_EC2_SECURITY_GROUP_ID }}
+        run: |
+          set -euo pipefail
+
+          # Generate a unique label for this runner
+          LABEL="release-$(head -c 4 /dev/urandom | xxd -p)"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "Runner label: $LABEL"
+
+          # Get a registration token from GitHub
+          REG_TOKEN=$(curl -sf \
+            -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/runners/registration-token" \
+            | jq -r '.token')
+
+          if [ -z "$REG_TOKEN" ] || [ "$REG_TOKEN" = "null" ]; then
+            echo "::error::Failed to get runner registration token"
+            exit 1
+          fi
+
+          # Build user-data script for EC2 instance
+          USER_DATA=$(cat <<'OUTER'
+          #!/bin/bash
+          set -e
+
+          # Install dependencies
+          apt-get update -y
+          apt-get install -y git libicu-dev curl xz-utils clang cmake ninja-build pkg-config libgtk-3-dev jq
+
+          # Create runner directory and download latest runner
+          mkdir -p /home/ubuntu/actions-runner && cd /home/ubuntu/actions-runner
+          case $(uname -m) in aarch64) ARCH="arm64" ;; amd64|x86_64) ARCH="x64" ;; esac
+          RUNNER_VERSION=$(curl -sf "https://api.github.com/repos/actions/runner/releases/latest" | jq -r '.tag_name' | tr -d 'v')
+          curl -sL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" | tar xz
+
+          # Configure and start the runner
+          chown -R ubuntu:ubuntu /home/ubuntu/actions-runner
+          OUTER
+          )
+
+          # Append the secrets (these can't go in a heredoc with single quotes)
+          USER_DATA="${USER_DATA}
+          runuser -u ubuntu -- ./config.sh --unattended --url https://github.com/${REPO} --token ${REG_TOKEN} --labels ${LABEL} --name ec2-${LABEL} --replace
+          runuser -u ubuntu -- ./run.sh"
+
+          # Launch EC2 instance
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$EC2_IMAGE_ID" \
+            --instance-type "$EC2_INSTANCE_TYPE" \
+            --subnet-id "$SUBNET_ID" \
+            --security-group-ids "$SECURITY_GROUP_ID" \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":50}}]' \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=github-actions-runner},{Key=GitHubRepository,Value=${REPO}},{Key=Purpose,Value=release}]" \
+            --user-data "$USER_DATA" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "ec2-instance-id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "Launched EC2 instance: $INSTANCE_ID"
+
+          # Wait for runner to register with GitHub
+          echo "Waiting for runner to register (label: $LABEL)..."
+          for i in $(seq 1 60); do
+            sleep 10
+            RUNNER_STATUS=$(curl -sf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runners" \
+              | jq -r ".runners[] | select(.labels[]?.name == \"$LABEL\") | .status" || true)
+
+            if [ "$RUNNER_STATUS" = "online" ]; then
+              echo "Runner is online!"
+              exit 0
+            fi
+            echo "  Attempt $i/60 — runner not yet online (status: ${RUNNER_STATUS:-not found})"
+          done
+
+          echo "::error::Runner did not come online within 10 minutes"
+          aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" || true
+          exit 1
 
   release:
     name: Release packages
@@ -154,10 +223,39 @@ jobs:
           role-to-assume: ${{ secrets.RELEASE_RUNNER_AWS_ROLE_ARN }}
           aws-region: ${{ secrets.RELEASE_RUNNER_AWS_REGION }}
 
-      - name: Stop EC2 runner
-        uses: machulav/ec2-github-runner@v2
-        with:
-          mode: stop
-          github-token: ${{ secrets.RELEASE_RUNNER_GH_PERSONAL_ACCESS_TOKEN }}
-          label: ${{ needs.start-runner.outputs.label }}
-          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
+      - name: Terminate EC2 instance and deregister runner
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_RUNNER_GH_PERSONAL_ACCESS_TOKEN }}
+          REPO: ${{ github.repository }}
+          EC2_INSTANCE_ID: ${{ needs.start-runner.outputs.ec2-instance-id }}
+          LABEL: ${{ needs.start-runner.outputs.label }}
+        run: |
+          set -euo pipefail
+
+          # Terminate the EC2 instance
+          if [ -n "$EC2_INSTANCE_ID" ]; then
+            echo "Terminating EC2 instance: $EC2_INSTANCE_ID"
+            aws ec2 terminate-instances --instance-ids "$EC2_INSTANCE_ID"
+          else
+            echo "No instance ID — skipping termination"
+          fi
+
+          # Deregister the runner from GitHub
+          if [ -n "$LABEL" ]; then
+            RUNNER_ID=$(curl -sf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runners" \
+              | jq -r ".runners[] | select(.labels[]?.name == \"$LABEL\") | .id" || true)
+
+            if [ -n "$RUNNER_ID" ] && [ "$RUNNER_ID" != "null" ]; then
+              echo "Removing runner $RUNNER_ID (label: $LABEL)"
+              curl -sf \
+                -X DELETE \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/runners/${RUNNER_ID}"
+            else
+              echo "Runner with label $LABEL not found — may have already been removed"
+            fi
+          fi
