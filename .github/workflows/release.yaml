@@ -23,7 +23,7 @@ jobs:
     #   1. Create a CodeBuild "Runner project" named "amplify-flutter-release"
     #      connected to this GitHub repository with a webhook.
     #   2. Use Ubuntu 8.0 image (24.04), instance size "medium".
-    #   3. Set build timeout to 480 minutes (maximum) to avoid interrupting releases.
+    #   3. Set build timeout to at least 12 hours avoid interrupting releases.
     #   See: https://docs.aws.amazon.com/codebuild/latest/userguide/action-runner.html
     runs-on:
       - codebuild-cadivus-amplify-flutter-${{ github.run_id }}-${{ github.run_attempt }}
