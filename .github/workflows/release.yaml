@@ -112,6 +112,14 @@ jobs:
         if: steps.check-tags.outputs.has_tags == 'true'
         run: aft publish --dry-run --force
 
+      - name: Install GitHub CLI
+        if: steps.check-tags.outputs.has_tags == 'true'
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install -y gh
+
       - name: Create GitHub releases
         if: steps.check-tags.outputs.has_tags == 'true'
         env:
