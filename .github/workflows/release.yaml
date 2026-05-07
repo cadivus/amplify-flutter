@@ -38,6 +38,9 @@ jobs:
         with:
           channel: stable
 
+      - name: Fix git ownership check
+        run: git config --global --add safe.directory '*'
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
